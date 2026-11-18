@@ -1,0 +1,138 @@
+
+name: Build Anis UNSS APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Extract fixed project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE=$(find . -maxdepth 4 -type f \
+            -name "Anis_UNSS_location_quran_fixed.zip" \
+            -print -quit)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Fixed project ZIP not found"
+            find . -maxdepth 4 -type f -name "*.zip"
+            exit 1
+          fi
+
+          mkdir -p extracted
+          unzip -oq "$ZIP_FILE" -d extracted
+
+          PACKAGE_FILE=$(find extracted -type f \
+            -name package.json -print -quit)
+
+          if [ -z "$PACKAGE_FILE" ]; then
+            echo "package.json missing inside ZIP"
+            find extracted -maxdepth 4 -type f | head -100
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PACKAGE_FILE")"
+
+          if [ ! -f "$PROJECT_DIR/capacitor.config.json" ]; then
+            echo "Capacitor configuration missing"
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/www/index.html" ]; then
+            echo "Web application files missing"
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npm install
+
+      - name: Add Android platform
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap add android
+
+      - name: Install native location and Adhan
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          bash native/android/install-native.sh
+
+      - name: Copy icons and sounds
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -e
+
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            mkdir -p "android/app/src/main/res/mipmap-$d"
+            if [ -d "resources/mipmap-$d" ]; then
+              find "resources/mipmap-$d" -maxdepth 1 \
+                -type f -name "*.png" \
+                -exec cp {} "android/app/src/main/res/mipmap-$d/" \;
+            fi
+          done
+
+          for d in mdpi hdpi xhdpi xxhdpi xxxhdpi nodpi; do
+            mkdir -p "android/app/src/main/res/drawable-$d"
+            if [ -d "resources/drawable-$d" ]; then
+              find "resources/drawable-$d" -maxdepth 1 \
+                -type f -name "*.png" \
+                -exec cp {} "android/app/src/main/res/drawable-$d/" \;
+            fi
+          done
+
+          mkdir -p android/app/src/main/res/raw
+
+          find resources/sounds -maxdepth 1 -type f \
+            \( -name "*.wav" -o -name "*.mp3" \) \
+            -exec cp {} android/app/src/main/res/raw/ \;
+
+      - name: Sync Android
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx cap sync android
+
+      - name: Verify native files
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          test -f android/app/src/main/java/com/anis/unss/LocationPlugin.java
+          test -f android/app/src/main/java/com/anis/unss/AdhanFullScreenActivity.java
+          test -f android/app/src/main/java/com/anis/unss/AdhanAlarmReceiver.java
+          test -f android/app/src/main/java/com/anis/unss/AdhanBootReceiver.java
+          test -f www/index.html
+
+      - name: Build APK
+        working-directory: ${{ env.PROJECT_DIR }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anis-UNSS-Fixed-APK
+          path: ${{ env.PROJECT_DIR }}/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
